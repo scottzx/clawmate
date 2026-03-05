@@ -235,8 +235,10 @@ function buildAgentEnv(
   groupDir: string,
 ): Record<string, string> {
   const projectRoot = process.cwd();
+  // Start with process.env but exclude CLAUDECODE to allow nested sessions
+  const { CLAUDECODE, ...parentEnv } = process.env;
   const env: Record<string, string> = {
-    ...process.env,
+    ...parentEnv,
     NANOCLAW_GROUP_FOLDER: group.folder,
     NANOCLAW_CHAT_JID: input.chatJid,
     NANOCLAW_IS_MAIN: input.isMain ? '1' : '0',
