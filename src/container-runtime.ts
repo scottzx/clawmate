@@ -4,10 +4,16 @@
  */
 import { execSync } from 'child_process';
 
+import { USE_CONTAINERS } from './config.js';
 import { logger } from './logger.js';
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
+
+/** Check if running in native mode (no container runtime) */
+export function isNativeMode(): boolean {
+  return !USE_CONTAINERS;
+}
 
 /** Returns CLI args for a readonly bind mount. */
 export function readonlyMountArgs(
@@ -24,6 +30,12 @@ export function stopContainer(name: string): string {
 
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
+  // In native mode, no container runtime is needed
+  if (isNativeMode()) {
+    logger.info('Running in native mode (no container runtime required)');
+    return;
+  }
+
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
@@ -62,6 +74,12 @@ export function ensureContainerRuntimeRunning(): void {
 
 /** Kill orphaned NanoClaw containers from previous runs. */
 export function cleanupOrphans(): void {
+  // In native mode, no orphan cleanup needed
+  if (isNativeMode()) {
+    logger.debug('Native mode: skipping orphan container cleanup');
+    return;
+  }
+
   try {
     const output = execSync(
       `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,

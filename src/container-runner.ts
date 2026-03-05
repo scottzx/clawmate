@@ -1,6 +1,6 @@
 /**
  * Container Runner for NanoClaw
- * Spawns agent execution in containers and handles IPC
+ * Spawns agent execution in containers or native Node.js subprocesses and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
@@ -14,12 +14,14 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
+  USE_CONTAINERS,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
+  isNativeMode,
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
@@ -223,6 +225,60 @@ function readSecrets(): Record<string, string> {
   ]);
 }
 
+/**
+ * Build environment variables for native Node.js mode.
+ * These replace the volume mounts used in container mode.
+ */
+function buildAgentEnv(
+  group: RegisteredGroup,
+  input: ContainerInput,
+  groupDir: string,
+): Record<string, string> {
+  const projectRoot = process.cwd();
+  const env: Record<string, string> = {
+    ...process.env,
+    NANOCLAW_GROUP_FOLDER: group.folder,
+    NANOCLAW_CHAT_JID: input.chatJid,
+    NANOCLAW_IS_MAIN: input.isMain ? '1' : '0',
+    TZ: TIMEZONE,
+  };
+
+  // Working directory for the agent
+  env.NANOCLAW_GROUP_DIR = groupDir;
+
+  // IPC directory
+  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  env.NANOCLAW_IPC_DIR = groupIpcDir;
+
+  // Sessions directory (where Claude stores conversation state)
+  const groupSessionsDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    '.claude',
+  );
+  fs.mkdirSync(groupSessionsDir, { recursive: true });
+  env.NANOCLAW_SESSIONS_DIR = groupSessionsDir;
+
+  // Main group gets project root as additional directory
+  if (input.isMain) {
+    env.NANOCLAW_PROJECT_ROOT = projectRoot;
+  }
+
+  // Global memory directory (non-main groups)
+  if (!input.isMain) {
+    const globalDir = path.join(GROUPS_DIR, 'global');
+    if (fs.existsSync(globalDir)) {
+      env.NANOCLAW_GLOBAL_DIR = globalDir;
+    }
+  }
+
+  return env;
+}
+
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -255,6 +311,400 @@ function buildContainerArgs(
   return args;
 }
 
+/**
+ * Run agent in native Node.js mode (no container).
+ * Spawns agent-runner as a direct subprocess with environment variables.
+ */
+async function runNativeAgent(
+  group: RegisteredGroup,
+  input: ContainerInput,
+  onProcess: (proc: ChildProcess, containerName: string) => void,
+  onOutput: ((output: ContainerOutput) => Promise<void>) | undefined,
+  groupDir: string,
+  startTime: number,
+): Promise<ContainerOutput> {
+  const agentRunnerPath = path.join(
+    process.cwd(),
+    'container',
+    'agent-runner',
+    'dist',
+    'index.js',
+  );
+
+  // Verify agent-runner exists
+  if (!fs.existsSync(agentRunnerPath)) {
+    return {
+      status: 'error',
+      result: null,
+      error: `Agent runner not found at ${agentRunnerPath}. Run 'npm run build' first.`,
+    };
+  }
+
+  // Initialize sessions directory and skills (same logic as buildVolumeMounts)
+  const groupSessionsDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    '.claude',
+  );
+  fs.mkdirSync(groupSessionsDir, { recursive: true });
+
+  const settingsFile = path.join(groupSessionsDir, 'settings.json');
+  if (!fs.existsSync(settingsFile)) {
+    fs.writeFileSync(
+      settingsFile,
+      JSON.stringify(
+        {
+          env: {
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+  }
+
+  // Sync skills from container/skills/ into each group's .claude/skills/
+  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  const skillsDst = path.join(groupSessionsDir, 'skills');
+  fs.mkdirSync(skillsDst, { recursive: true });
+  if (fs.existsSync(skillsSrc)) {
+    for (const skillDir of fs.readdirSync(skillsSrc)) {
+      const srcDir = path.join(skillsSrc, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(skillsDst, skillDir);
+      fs.cpSync(srcDir, dstDir, { recursive: true, force: true });
+    }
+  }
+
+  const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
+  const agentName = `nanoclaw-${safeName}-${Date.now()}`;
+  const agentEnv = buildAgentEnv(group, input, groupDir);
+
+  logger.debug(
+    {
+      group: group.name,
+      agentName,
+      env: Object.keys(agentEnv).filter((k) => k.startsWith('NANOCLAW_')),
+    },
+    'Native agent configuration',
+  );
+
+  logger.info(
+    {
+      group: group.name,
+      agentName,
+      isMain: input.isMain,
+    },
+    'Spawning native agent (Node.js subprocess)',
+  );
+
+  const logsDir = path.join(groupDir, 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+
+  return new Promise((resolve) => {
+    const agent = spawn('node', [agentRunnerPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: groupDir,
+      env: agentEnv,
+    });
+
+    onProcess(agent, agentName);
+
+    let stdout = '';
+    let stderr = '';
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+
+    // Pass secrets via stdin
+    input.secrets = readSecrets();
+    agent.stdin.write(JSON.stringify(input));
+    agent.stdin.end();
+    delete input.secrets;
+
+    // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
+    let parseBuffer = '';
+    let newSessionId: string | undefined;
+    let outputChain = Promise.resolve();
+
+    agent.stdout.on('data', (data) => {
+      const chunk = data.toString();
+
+      // Always accumulate for logging
+      if (!stdoutTruncated) {
+        const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
+        if (chunk.length > remaining) {
+          stdout += chunk.slice(0, remaining);
+          stdoutTruncated = true;
+          logger.warn(
+            { group: group.name, size: stdout.length },
+            'Agent stdout truncated due to size limit',
+          );
+        } else {
+          stdout += chunk;
+        }
+      }
+
+      // Stream-parse for output markers
+      if (onOutput) {
+        parseBuffer += chunk;
+        let startIdx: number;
+        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+          const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
+          if (endIdx === -1) break;
+
+          const jsonStr = parseBuffer
+            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+            .trim();
+          parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+
+          try {
+            const parsed: ContainerOutput = JSON.parse(jsonStr);
+            if (parsed.newSessionId) {
+              newSessionId = parsed.newSessionId;
+            }
+            outputChain = outputChain.then(() => onOutput(parsed));
+          } catch (err) {
+            logger.warn(
+              { group: group.name, error: err },
+              'Failed to parse streamed output chunk',
+            );
+          }
+        }
+      }
+    });
+
+    agent.stderr.on('data', (data) => {
+      const chunk = data.toString();
+      const lines = chunk.trim().split('\n');
+      for (const line of lines) {
+        if (line) logger.debug({ agent: group.folder }, line);
+      }
+      if (stderrTruncated) return;
+      const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
+      if (chunk.length > remaining) {
+        stderr += chunk.slice(0, remaining);
+        stderrTruncated = true;
+        logger.warn(
+          { group: group.name, size: stderr.length },
+          'Agent stderr truncated due to size limit',
+        );
+      } else {
+        stderr += chunk;
+      }
+    });
+
+    let timedOut = false;
+    let hadStreamingOutput = false;
+    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+
+    const killOnTimeout = () => {
+      timedOut = true;
+      logger.error(
+        { group: group.name, agentName },
+        'Agent timeout, killing process',
+      );
+      agent.kill('SIGKILL');
+    };
+
+    let timeout = setTimeout(killOnTimeout, timeoutMs);
+
+    const resetTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(killOnTimeout, timeoutMs);
+    };
+
+    // Hook up stdin pipe for follow-up messages (same as container mode)
+    const originalStdinWrite = agent.stdin.write;
+    agent.stdin.write = function (...args) {
+      resetTimeout();
+      return originalStdinWrite.apply(this, args as any);
+    };
+
+    agent.on('close', (code) => {
+      clearTimeout(timeout);
+      const duration = Date.now() - startTime;
+
+      if (timedOut) {
+        if (hadStreamingOutput) {
+          logger.info(
+            { group: group.name, agentName, duration, code },
+            'Agent timed out after output (idle cleanup)',
+          );
+          outputChain.then(() => {
+            resolve({
+              status: 'success',
+              result: null,
+              newSessionId,
+            });
+          });
+          return;
+        }
+
+        logger.error(
+          { group: group.name, agentName, duration, code },
+          'Agent timed out with no output',
+        );
+
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Agent timed out after ${configTimeout}ms`,
+        });
+        return;
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const logFile = path.join(logsDir, `agent-${timestamp}.log`);
+      const isVerbose =
+        process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
+
+      const logLines = [
+        `=== Agent Run Log (Native Mode) ===`,
+        `Timestamp: ${new Date().toISOString()}`,
+        `Group: ${group.name}`,
+        `IsMain: ${input.isMain}`,
+        `Duration: ${duration}ms`,
+        `Exit Code: ${code}`,
+        `Stdout Truncated: ${stdoutTruncated}`,
+        `Stderr Truncated: ${stderrTruncated}`,
+        ``,
+      ];
+
+      const isError = code !== 0;
+
+      if (isVerbose || isError) {
+        logLines.push(
+          `=== Input ===`,
+          JSON.stringify(input, null, 2),
+          ``,
+          `=== Environment Variables ===`,
+          Object.entries(agentEnv)
+            .filter(([k]) => k.startsWith('NANOCLAW_'))
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n'),
+          ``,
+          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+          stderr,
+          ``,
+          `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
+          stdout,
+        );
+      } else {
+        logLines.push(
+          `=== Input Summary ===`,
+          `Prompt length: ${input.prompt.length} chars`,
+          `Session ID: ${input.sessionId || 'new'}`,
+          ``,
+        );
+      }
+
+      fs.writeFileSync(logFile, logLines.join('\n'));
+      logger.debug({ logFile, verbose: isVerbose }, 'Agent log written');
+
+      if (code !== 0) {
+        logger.error(
+          {
+            group: group.name,
+            code,
+            duration,
+            stderr,
+            stdout,
+            logFile,
+          },
+          'Agent exited with error',
+        );
+
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Agent exited with code ${code}: ${stderr.slice(-200)}`,
+        });
+        return;
+      }
+
+      // Streaming mode: wait for output chain to settle
+      if (onOutput) {
+        outputChain.then(() => {
+          logger.info(
+            { group: group.name, duration, newSessionId },
+            'Agent completed (streaming mode)',
+          );
+          resolve({
+            status: 'success',
+            result: null,
+            newSessionId,
+          });
+        });
+        return;
+      }
+
+      // Legacy mode: parse the last output marker pair
+      try {
+        const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
+        const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+
+        let jsonLine: string;
+        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+          jsonLine = stdout
+            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+            .trim();
+        } else {
+          const lines = stdout.trim().split('\n');
+          jsonLine = lines[lines.length - 1];
+        }
+
+        const output: ContainerOutput = JSON.parse(jsonLine);
+
+        logger.info(
+          {
+            group: group.name,
+            duration,
+            status: output.status,
+            hasResult: !!output.result,
+          },
+          'Agent completed',
+        );
+
+        resolve(output);
+      } catch (err) {
+        logger.error(
+          {
+            group: group.name,
+            stdout,
+            stderr,
+            error: err,
+          },
+          'Failed to parse agent output',
+        );
+
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Failed to parse agent output: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    });
+
+    agent.on('error', (err) => {
+      clearTimeout(timeout);
+      logger.error(
+        { group: group.name, agentName, error: err },
+        'Agent spawn error',
+      );
+      resolve({
+        status: 'error',
+        result: null,
+        error: `Agent spawn error: ${err.message}`,
+      });
+    });
+  });
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -266,6 +716,19 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  // NATIVE MODE: Spawn Node.js subprocess directly
+  if (isNativeMode()) {
+    return runNativeAgent(
+      group,
+      input,
+      onProcess,
+      onOutput,
+      groupDir,
+      startTime,
+    );
+  }
+
+  // CONTAINER MODE: Original Docker/Apple Container logic
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;

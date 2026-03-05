@@ -55,9 +55,15 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+// Use environment variables for paths (native mode) or fall back to container paths
+const IPC_INPUT_DIR = process.env.NANOCLAW_IPC_DIR
+  ? path.join(process.env.NANOCLAW_IPC_DIR, 'input')
+  : '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+
+const GROUP_DIR = process.env.NANOCLAW_GROUP_DIR || '/workspace/group';
+const SESSIONS_DIR = process.env.NANOCLAW_SESSIONS_DIR || path.join(process.cwd(), '.claude');
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -166,7 +172,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
+      const conversationsDir = path.join(GROUP_DIR, 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -392,14 +398,16 @@ async function runQuery(
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const globalClaudeMdPath = process.env.NANOCLAW_GLOBAL_DIR
+    ? path.join(process.env.NANOCLAW_GLOBAL_DIR, 'CLAUDE.md')
+    : '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
-  // Discover additional directories mounted at /workspace/extra/*
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  // Discover additional directories mounted at /workspace/extra/* (container mode)
+  // or use NANOCLAW_PROJECT_ROOT (native mode)
   const extraDirs: string[] = [];
   const extraBase = '/workspace/extra';
   if (fs.existsSync(extraBase)) {
@@ -410,6 +418,10 @@ async function runQuery(
       }
     }
   }
+  // Native mode: add project root as additional directory
+  if (process.env.NANOCLAW_PROJECT_ROOT && fs.existsSync(process.env.NANOCLAW_PROJECT_ROOT)) {
+    extraDirs.push(process.env.NANOCLAW_PROJECT_ROOT);
+  }
   if (extraDirs.length > 0) {
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
@@ -417,7 +429,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      cwd: '/workspace/group',
+      cwd: GROUP_DIR,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -446,6 +458,7 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            NANOCLAW_IPC_DIR: process.env.NANOCLAW_IPC_DIR || '',
           },
         },
       },
@@ -496,8 +509,8 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
-    // Delete the temp file the entrypoint wrote — it contains secrets
-    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
+    // Delete the temp file the entrypoint wrote — it contains secrets (container mode only)
+    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist in native mode */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({

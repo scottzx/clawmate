@@ -37,6 +37,10 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
+// Use containers (Docker/Apple Container) or native Node.js subprocess
+// Set to '1' to force container mode even when native mode is available
+export const USE_CONTAINERS = process.env.NANOCLAW_USE_CONTAINERS === '1';
+
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
