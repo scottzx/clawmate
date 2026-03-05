@@ -5,7 +5,7 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { setRegisteredGroup } from '../db.js';
+import { setRegisteredGroup, getRegisteredGroup } from '../db.js';
 import { resolveGroupFolderPath, isValidGroupFolder } from '../group-folder.js';
 import fs from 'fs';
 import path from 'path';
@@ -25,6 +25,10 @@ export interface DingTalkChannelOpts {
 // Map conversationId to sessionWebhook for sending replies
 type SessionWebhookMap = Map<string, string>;
 
+// Map conversationId to pending commands (for confirmation flow)
+type PendingCommand = { type: string; timestamp: number };
+type PendingCommandsMap = Map<string, PendingCommand>;
+
 /**
  * DingTalk Channel using Stream Mode SDK
  * @see https://github.com/open-dingtalk/dingtalk-stream-sdk-nodejs
@@ -37,6 +41,7 @@ export class DingTalkChannel implements Channel {
   private clientId: string;
   private clientSecret: string;
   private sessionWebhooks: SessionWebhookMap = new Map();
+  private pendingCommands: PendingCommandsMap = new Map();
 
   constructor(
     clientId: string,
@@ -164,6 +169,118 @@ export class DingTalkChannel implements Channel {
         'Message from unregistered DingTalk conversation',
       );
       return;
+    }
+
+    // Commands that require the group to be registered
+    if (msgtype === 'text' && text?.content) {
+      const content = text.content.trim();
+
+      // /set-main command - set current group as a main group
+      if (content === '/set-main' || content === '！设置主群') {
+        if (group.isMain) {
+          await this.sendMessage(
+            chatJid,
+            `此群已经是主群了。\n\n名称：${group.name}\n文件夹：${group.folder}`,
+          );
+        } else {
+          // Require explicit confirmation
+          await this.sendMessage(
+            chatJid,
+            `⚠️ 即将把此群设置为主群。\n\n主群特权：\n• 可以看到所有群的任务\n• 可以管理其他群组\n\n发送 /set-main-confirm 确认，或 /cancel 取消`,
+          );
+          // Store pending command in session (using timestamp as key)
+          this.pendingCommands.set(conversationId, {
+            type: 'set-main',
+            timestamp: Date.now(),
+          });
+        }
+        return;
+      }
+
+      // /set-main-confirm command
+      if (content === '/set-main-confirm' || content === '！确认设置主群') {
+        const pending = this.pendingCommands.get(conversationId);
+        if (
+          pending?.type === 'set-main' &&
+          Date.now() - pending.timestamp < 60000
+        ) {
+          setRegisteredGroup(chatJid, {
+            ...group,
+            isMain: true,
+          });
+          this.pendingCommands.delete(conversationId);
+          logger.info(
+            { chatJid, name: group.name },
+            'Group set as main via command',
+          );
+          await this.sendMessage(
+            chatJid,
+            `✅ 此群已设置为主群！\n\n名称：${group.name}\n文件夹：${group.folder}`,
+          );
+        } else {
+          await this.sendMessage(
+            chatJid,
+            `确认超时或没有待确认的操作。请重新发送 /set-main`,
+          );
+        }
+        return;
+      }
+
+      // /unset-main command - remove main group status
+      if (content === '/unset-main' || content === '！取消主群') {
+        if (!group.isMain) {
+          await this.sendMessage(chatJid, `此群不是主群。\n\n当前状态：普通群`);
+        } else {
+          await this.sendMessage(
+            chatJid,
+            `⚠️ 即将取消此群的主群状态。\n\n发送 /unset-main-confirm 确认，或 /cancel 取消`,
+          );
+          this.pendingCommands.set(conversationId, {
+            type: 'unset-main',
+            timestamp: Date.now(),
+          });
+        }
+        return;
+      }
+
+      // /unset-main-confirm command
+      if (content === '/unset-main-confirm' || content === '！确认取消主群') {
+        const pending = this.pendingCommands.get(conversationId);
+        if (
+          pending?.type === 'unset-main' &&
+          Date.now() - pending.timestamp < 60000
+        ) {
+          setRegisteredGroup(chatJid, {
+            ...group,
+            isMain: false,
+          });
+          this.pendingCommands.delete(conversationId);
+          logger.info(
+            { chatJid, name: group.name },
+            'Group unset as main via command',
+          );
+          await this.sendMessage(
+            chatJid,
+            `✅ 已取消主群状态！\n\n名称：${group.name}\n文件夹：${group.folder}`,
+          );
+        } else {
+          await this.sendMessage(
+            chatJid,
+            `确认超时或没有待确认的操作。请重新发送 /unset-main`,
+          );
+        }
+        return;
+      }
+
+      // /cancel command - cancel pending operation
+      if (content === '/cancel' || content === '！取消') {
+        const pending = this.pendingCommands.get(conversationId);
+        if (pending) {
+          this.pendingCommands.delete(conversationId);
+          await this.sendMessage(chatJid, `已取消操作：${pending.type}`);
+        }
+        return;
+      }
     }
 
     // Determine message content based on type

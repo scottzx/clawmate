@@ -119,6 +119,20 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Warn if multiple main groups are detected (for awareness, not blocking)
+  const mainGroups = db
+    .prepare(`SELECT jid, name FROM registered_groups WHERE is_main = 1`)
+    .all() as Array<{ jid: string; name: string }>;
+  if (mainGroups.length > 1) {
+    logger.warn(
+      {
+        count: mainGroups.length,
+        groups: mainGroups.map((g) => ({ jid: g.jid, name: g.name })),
+      },
+      'Multiple main groups detected.',
+    );
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
