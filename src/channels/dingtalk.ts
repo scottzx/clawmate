@@ -170,7 +170,7 @@ export class DingTalkChannel implements Channel {
     let messageContent = '';
     switch (msgtype as string) {
       case 'text':
-        messageContent = text?.content || '';
+        messageContent = text?.content?.trim() || '';
         break;
       case 'image':
         messageContent = '[Image]';
@@ -292,7 +292,7 @@ export class DingTalkChannel implements Channel {
         folder,
         trigger,
         added_at: new Date().toISOString(),
-        requiresTrigger: true,
+        requiresTrigger: false,
       });
 
       logger.info(
@@ -301,7 +301,7 @@ export class DingTalkChannel implements Channel {
       );
       await this.sendMessage(
         chatJid,
-        `✅ 注册成功！\n\n名称：${name}\n文件夹：${folder}\n触发器：${trigger}\n\n现在可以向机器人发送 "${trigger} 消息内容" 来使用我了！`,
+        `✅ 注册成功！\n\n名称：${name}\n文件夹：${folder}\n\n现在可以直接发送消息，无需触发器！`,
       );
     } catch (err) {
       logger.error({ chatJid, err }, 'Failed to register group in database');
