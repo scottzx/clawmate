@@ -127,7 +127,23 @@ Tell the user:
 
 Wait for the user to provide the conversation ID.
 
-### Register the conversation
+### Self-Registration (Recommended)
+
+Users can self-register groups directly from the chat:
+
+```
+/register 名称|文件夹|触发器
+```
+
+Example: `/register 我的群|my_group|@Andy`
+
+The bot will:
+1. Validate the inputs
+2. Create the group folder with CLAUDE.md
+3. Register the group in the database
+4. Enable the bot for the group (no trigger required)
+
+### Register the conversation (Manual Method)
 
 Use the IPC register flow or register directly. The conversation ID and folder name are needed.
 
@@ -155,6 +171,35 @@ registerGroup("dingtalk:<conversation-id>", {
   requiresTrigger: true,
 });
 ```
+
+## Available Commands
+
+The DingTalk bot supports the following commands (work even for unregistered groups):
+
+| Command | Description | Works Unregistered |
+|---------|-------------|-------------------|
+| `/chatid` or `！chatid` | Show conversation ID and registration status | ✅ |
+| `/register` or `！register` | Show registration help | ✅ |
+| `/register 名称\|文件夹\|触发器` | Self-register the group | ✅ |
+| `/ping` or `！ping` | Check if bot is online | ✅ |
+
+Commands for registered groups only:
+
+| Command | Description |
+|---------|-------------|
+| `/set-main` or `！设置主群` | Set current group as main (requires confirmation) |
+| `/set-main-confirm` or `！确认设置主群` | Confirm setting as main group |
+| `/unset-main` or `！取消主群` | Remove main group status (requires confirmation) |
+| `/unset-main-confirm` or `！确认取消主群` | Confirm removing main status |
+| `/cancel` or `！取消` | Cancel pending operation |
+
+**Main Group Features:**
+- Can see tasks from all groups
+- Can manage other groups
+- No trigger required for any message
+
+**Confirmation Flow:**
+Destructive operations (`/set-main`, `/unset-main`) require confirmation. The confirmation must be sent within 60 seconds.
 
 ## Phase 5: Verify
 
