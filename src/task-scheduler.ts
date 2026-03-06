@@ -187,9 +187,16 @@ async function runTask(
         if (streamedOutput.toolCall) {
           const { name, args } = streamedOutput.toolCall;
           const emojiMap: Record<string, string> = {
-            'Bash': '🖥️', 'Read': '📖', 'Write': '✍️', 'Edit': '📝',
-            'Grep': '🔍', 'Glob': '📁', 'WebSearch': '🌐', 'WebFetch': '📥',
-            'Task': '🤖', 'Skill': '🧩',
+            Bash: '🖥️',
+            Read: '📖',
+            Write: '✍️',
+            Edit: '📝',
+            Grep: '🔍',
+            Glob: '📁',
+            WebSearch: '🌐',
+            WebFetch: '📥',
+            Task: '🤖',
+            Skill: '🧩',
           };
           const emoji = emojiMap[name] || '🔧';
           const text = args

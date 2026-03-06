@@ -205,16 +205,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Helper to get emoji for tool names
   const getToolEmoji = (toolName: string): string => {
     const emojiMap: Record<string, string> = {
-      'Bash': '🖥️',
-      'Read': '📖',
-      'Write': '✍️',
-      'Edit': '📝',
-      'Grep': '🔍',
-      'Glob': '📁',
-      'WebSearch': '🌐',
-      'WebFetch': '📥',
-      'Task': '🤖',
-      'Skill': '🧩',
+      Bash: '🖥️',
+      Read: '📖',
+      Write: '✍️',
+      Edit: '📝',
+      Grep: '🔍',
+      Glob: '📁',
+      WebSearch: '🌐',
+      WebFetch: '📥',
+      Task: '🤖',
+      Skill: '🧩',
     };
     return emojiMap[toolName] || '🔧';
   };
