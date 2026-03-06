@@ -183,6 +183,23 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        // Handle tool call notifications
+        if (streamedOutput.toolCall) {
+          const { name, args } = streamedOutput.toolCall;
+          const emojiMap: Record<string, string> = {
+            'Bash': '🖥️', 'Read': '📖', 'Write': '✍️', 'Edit': '📝',
+            'Grep': '🔍', 'Glob': '📁', 'WebSearch': '🌐', 'WebFetch': '📥',
+            'Task': '🤖', 'Skill': '🧩',
+          };
+          const emoji = emojiMap[name] || '🔧';
+          const text = args
+            ? `${emoji} 调用 \`${name}\`: \`${args}\``
+            : `${emoji} 调用 \`${name}\``;
+          await deps.sendMessage(task.chat_jid, text);
+          // Don't schedule close for tool notifications
+          return;
+        }
+
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)

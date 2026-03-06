@@ -35,6 +35,11 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  /** Tool call notification for showing progress to users */
+  toolCall?: {
+    name: string;
+    args?: string;
+  };
 }
 
 interface SessionEntry {
@@ -212,6 +217,55 @@ function createSanitizeBashHook(): HookCallback {
         },
       },
     };
+  };
+}
+
+/**
+ * Creates a hook that notifies users when tools are being called.
+ * Sends tool name and args summary via stdout for the host to display.
+ */
+function createToolCallNotificationHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const preInput = input as PreToolUseHookInput;
+    const toolName = preInput.tool_name;
+
+    // Format args summary (truncate to avoid excessive output)
+    let argsSummary = '';
+    if (preInput.tool_input && typeof preInput.tool_input === 'object') {
+      const args = preInput.tool_input as Record<string, unknown>;
+      // Extract key parameters for common tools
+      if (toolName === 'Bash') {
+        argsSummary = (args.command as string)?.slice(0, 100) || '';
+      } else if (toolName === 'Read') {
+        argsSummary = (args.file_path as string) || '';
+      } else if (toolName === 'Write' || toolName === 'Edit') {
+        argsSummary = (args.file_path as string) || '';
+      } else if (toolName === 'Grep') {
+        argsSummary = `${args.pattern} ${args.path || ''}`.slice(0, 100);
+      } else if (toolName === 'Glob') {
+        argsSummary = (args.pattern as string)?.slice(0, 100) || '';
+      } else if (toolName === 'WebSearch') {
+        argsSummary = (args.query as string)?.slice(0, 100) || '';
+      } else if (toolName === 'WebFetch') {
+        argsSummary = (args.url as string)?.slice(0, 100) || '';
+      } else {
+        // For other tools, just show first 100 chars of JSON
+        argsSummary = JSON.stringify(args).slice(0, 100);
+      }
+    }
+
+    // Send tool call notification via stdout
+    writeOutput({
+      status: 'success',
+      result: null,
+      toolCall: {
+        name: toolName,
+        args: argsSummary || undefined,
+      },
+    });
+
+    // Don't modify tool input, just notify
+    return {};
   };
 }
 
@@ -464,7 +518,12 @@ async function runQuery(
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
+        PreToolUse: [
+          // Bash sanitization must run first to clean secrets
+          { matcher: 'Bash', hooks: [createSanitizeBashHook()] },
+          // Tool call notification for all tools
+          { matcher: '*', hooks: [createToolCallNotificationHook()] },
+        ],
       },
     }
   })) {

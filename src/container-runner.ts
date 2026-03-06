@@ -48,6 +48,11 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  /** Tool call notification for showing progress to users */
+  toolCall?: {
+    name: string;
+    args?: string;
+  };
 }
 
 interface VolumeMount {

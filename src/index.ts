@@ -202,7 +202,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Helper to get emoji for tool names
+  const getToolEmoji = (toolName: string): string => {
+    const emojiMap: Record<string, string> = {
+      'Bash': '🖥️',
+      'Read': '📖',
+      'Write': '✍️',
+      'Edit': '📝',
+      'Grep': '🔍',
+      'Glob': '📁',
+      'WebSearch': '🌐',
+      'WebFetch': '📥',
+      'Task': '🤖',
+      'Skill': '🧩',
+    };
+    return emojiMap[toolName] || '🔧';
+  };
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
+    // Handle tool call notifications
+    if (result.toolCall) {
+      const { name, args } = result.toolCall;
+      const emoji = getToolEmoji(name);
+      const text = args
+        ? `${emoji} 调用 \`${name}\`: \`${args}\``
+        : `${emoji} 调用 \`${name}\``;
+      await channel.sendMessage(chatJid, text);
+      // Don't reset idle timer for tool call notifications
+      // (long-running tools shouldn't keep container alive indefinitely)
+      return;
+    }
+
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
