@@ -11,4 +11,4 @@
 
 // whatsapp
 
-// dingtalk
+import './dingtalk.js';
