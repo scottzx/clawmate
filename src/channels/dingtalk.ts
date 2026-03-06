@@ -380,7 +380,11 @@ export class DingTalkChannel implements Channel {
     if (existingGroup) {
       // Delete old registration but keep the folder to avoid data loss
       logger.info(
-        { chatJid, oldName: existingGroup.name, oldFolder: existingGroup.folder },
+        {
+          chatJid,
+          oldName: existingGroup.name,
+          oldFolder: existingGroup.folder,
+        },
         'Re-registering DingTalk conversation, removing old registration',
       );
       // Note: We don't delete the old folder to preserve conversation history
